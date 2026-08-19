@@ -72,7 +72,7 @@ func TestClusterState_AddPod(t *testing.T) {
 			ctx := t.Context()
 			logger := klog.FromContext(ctx)
 			sharedSnap := cache.NewEmptySnapshot()
-			state := New(cache.New(ctx, nil, false), newDummyProfileMap(), sharedSnap)
+			state := New(cache.New(ctx, nil, false, false), newDummyProfileMap(), sharedSnap)
 
 			state.Cache.AddNode(logger, st.MakeNode().Name("node1").Obj())
 
@@ -130,7 +130,7 @@ func TestClusterState_RemovePod(t *testing.T) {
 			ctx := t.Context()
 			logger := klog.FromContext(ctx)
 			sharedSnap := cache.NewEmptySnapshot()
-			state := New(cache.New(ctx, nil, false), newDummyProfileMap(), sharedSnap)
+			state := New(cache.New(ctx, nil, false, false), newDummyProfileMap(), sharedSnap)
 
 			state.Cache.AddNode(logger, st.MakeNode().Name("node1").Obj())
 
@@ -195,7 +195,7 @@ func TestClusterState_AddNode(t *testing.T) {
 			ctx := t.Context()
 			logger := klog.FromContext(ctx)
 			sharedSnap := cache.NewEmptySnapshot()
-			state := New(cache.New(ctx, nil, false), newDummyProfileMap(), sharedSnap)
+			state := New(cache.New(ctx, nil, false, false), newDummyProfileMap(), sharedSnap)
 
 			for _, n := range tc.existingNodes {
 				state.Cache.AddNode(logger, n)
@@ -246,7 +246,7 @@ func TestClusterState_RemoveNode(t *testing.T) {
 			ctx := t.Context()
 			logger := klog.FromContext(ctx)
 			sharedSnap := cache.NewEmptySnapshot()
-			state := New(cache.New(ctx, nil, false), newDummyProfileMap(), sharedSnap)
+			state := New(cache.New(ctx, nil, false, false), newDummyProfileMap(), sharedSnap)
 
 			for _, n := range tc.existingNodes {
 				state.Cache.AddNode(logger, n)
@@ -333,7 +333,7 @@ func TestClusterState_Snapshot(t *testing.T) {
 				profiles = newDummyProfileMap()
 			}
 
-			state := New(cache.New(ctx, nil, false), profiles, sharedSnap)
+			state := New(cache.New(ctx, nil, false, false), profiles, sharedSnap)
 
 			for _, n := range tc.existingNodes {
 				state.Cache.AddNode(logger, n)
@@ -449,7 +449,7 @@ func TestClusterState_SequentialUpdates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			sharedSnap := cache.NewEmptySnapshot()
-			state := New(cache.New(ctx, nil, false), newDummyProfileMap(), sharedSnap)
+			state := New(cache.New(ctx, nil, false, false), newDummyProfileMap(), sharedSnap)
 
 			for _, step := range tc.steps {
 				step(t, state)
@@ -487,7 +487,7 @@ func TestClusterState_SyncSnapshot_RevertsMutations(t *testing.T) {
 		},
 	}
 
-	state := New(cache.New(ctx, nil, false), profiles, sharedSnap)
+	state := New(cache.New(ctx, nil, false, false), profiles, sharedSnap)
 
 	node1 := st.MakeNode().Name("node1").Capacity(map[v1.ResourceName]string{
 		v1.ResourceCPU:    "10",

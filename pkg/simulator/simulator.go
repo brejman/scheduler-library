@@ -24,10 +24,11 @@ import (
 	"sigs.k8s.io/scheduler-library/pkg/upstreamsync/snapshot"
 
 	v1 "k8s.io/api/core/v1"
-
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	fwk "k8s.io/kube-scheduler/framework"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler"
 	schedulerapi "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/backend/cache"
@@ -102,7 +103,7 @@ func NewSchedulingSimulator(
 	framework.InitMetricsOnce()
 
 	if informerFactory == nil {
-		informerFactory = scheduler.NewInformerFactory(client.client, 0)
+		informerFactory = scheduler.NewInformerFactory(client.client, 0, nil)
 	}
 	_ = informerFactory.Core().V1().Nodes().Informer()
 	_ = informerFactory.Core().V1().Pods().Informer()
@@ -123,7 +124,7 @@ func NewSchedulingSimulator(
 func (s *SchedulingSimulator) NewClusterState(ctx context.Context) (*state.ClusterState, error) {
 	snap := cache.NewEmptySnapshot()
 
-	internalCache := cache.New(ctx, nil, false)
+	internalCache := cache.New(ctx, nil, utilfeature.DefaultFeatureGate.Enabled(features.GenericWorkload), utilfeature.DefaultFeatureGate.Enabled(features.CompositePodGroup))
 	profiles, err := s.buildProfileMap(ctx, snap)
 	if err != nil {
 		return nil, err

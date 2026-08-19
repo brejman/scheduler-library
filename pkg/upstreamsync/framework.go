@@ -180,8 +180,7 @@ func NewProfileMap(ctx context.Context,
 		// If device taint rules are disabled, the additional informers are not needed and
 		// the tracker turns into a simple wrapper around the slice informer.
 		if resourceSliceTrackerOpts.EnableDeviceTaintRules {
-			resourceSliceTrackerOpts.TaintInformer = informerFactory.Resource().V1beta2().DeviceTaintRules()
-			resourceSliceTrackerOpts.ClassInformer = informerFactory.Resource().V1().DeviceClasses()
+			resourceSliceTrackerOpts.TaintInformer = informerFactory.Resource().V1().DeviceTaintRules()
 		}
 		resourceSliceTracker, err = resourceslicetracker.StartTracker(ctx, resourceSliceTrackerOpts)
 		if err != nil {
@@ -196,7 +195,7 @@ func NewProfileMap(ctx context.Context,
 		apiDispatcher = apidispatcher.New(client, int(options.parallelism), apicalls.Relevances)
 	}
 
-	schedulerCache := internalcache.New(ctx, apiDispatcher, feature.DefaultFeatureGate.Enabled(features.GenericWorkload))
+	schedulerCache := internalcache.New(ctx, apiDispatcher, feature.DefaultFeatureGate.Enabled(features.GenericWorkload), feature.DefaultFeatureGate.Enabled(features.CompositePodGroup))
 
 	profileMap, err := profile.NewMap(ctx, options.profiles, registry, recorderFactory,
 		frameworkruntime.WithClientSet(client),

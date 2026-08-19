@@ -15,7 +15,6 @@
 package upstreamsync
 
 import (
-	"container/heap"
 	"context"
 	"errors"
 	"fmt"
@@ -326,8 +325,8 @@ func (sched *Scheduler) schedulePod(ctx context.Context, fwk framework.Framework
 		return result, err
 	}
 
-	sortedPrioritizedNodes := newSortedNodeScores(priorityList)
-	node := sortedPrioritizedNodes.Pop()
+	sortedPrioritizedNodes := framework.NewSortedScoredNodes(priorityList)
+	node := sortedPrioritizedNodes.Pop().Name
 	trace.Step("Prioritizing done")
 
 	if utilfeature.DefaultFeatureGate.Enabled(features.OpportunisticBatching) {
@@ -785,52 +784,4 @@ func prioritizeNodes(
 		}
 	}
 	return nodesScores, nil
-}
-
-// sortedNodeScores pops the scored nodes in a decreasing score order.
-//
-// UPSTREAM-DIFF: none, copied verbatim, minus the PopScore method that upstream only uses in its
-// own unit tests.
-type sortedNodeScores struct {
-	nodes nodeScoreHeap
-}
-
-func newSortedNodeScores(nodeScoreList []fwk.NodePluginScores) *sortedNodeScores {
-	var h nodeScoreHeap = nodeScoreList
-	heap.Init(&h)
-	return &sortedNodeScores{nodes: h}
-}
-
-func (s *sortedNodeScores) Pop() string {
-	ent := heap.Pop(&s.nodes).(fwk.NodePluginScores)
-	return ent.Name
-}
-
-func (s *sortedNodeScores) Len() int {
-	return s.nodes.Len()
-}
-
-// nodeScoreHeap is a heap of fwk.NodePluginScores.
-type nodeScoreHeap []fwk.NodePluginScores
-
-// nodeScoreHeap implements heap.Interface.
-var _ heap.Interface = &nodeScoreHeap{}
-
-func (h nodeScoreHeap) Len() int { return len(h) }
-func (h nodeScoreHeap) Less(i, j int) bool {
-	return (h[i].TotalScore > h[j].TotalScore ||
-		(h[i].TotalScore == h[j].TotalScore && h[i].Randomizer > h[j].Randomizer))
-}
-func (h nodeScoreHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-
-func (h *nodeScoreHeap) Push(x interface{}) {
-	*h = append(*h, x.(fwk.NodePluginScores))
-}
-
-func (h *nodeScoreHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
 }

@@ -63,7 +63,7 @@ func NewProfileMap(ctx context.Context, client kubernetes.Interface, informerFac
 	}
 
 	if informerFactory == nil {
-		informerFactory = scheduler.NewInformerFactory(client, 0)
+		informerFactory = scheduler.NewInformerFactory(client, 0, nil)
 	}
 
 	opts := []upstreamsync.Option{}
@@ -129,7 +129,7 @@ type noopAPICacher struct{}
 
 var _ fwk.APICacher = &noopAPICacher{}
 
-func (c *noopAPICacher) PatchPodStatus(pod *v1.Pod, condition *v1.PodCondition, nominatingInfo *fwk.NominatingInfo) (<-chan error, error) {
+func (c *noopAPICacher) PatchPodStatus(pod *v1.Pod, conditions []*v1.PodCondition, nominatingInfo *fwk.NominatingInfo) (<-chan error, error) {
 	ch := make(chan error)
 	close(ch)
 	return ch, nil
