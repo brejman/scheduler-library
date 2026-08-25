@@ -198,9 +198,9 @@ func (s *ClusterSnapshot) CanSchedulePod(ctx context.Context, pod *v1.Pod, place
 
 func schedulingResult(algRes *upstreamsync.AlgorithmResult) SchedulingResult {
 	return SchedulingResult{
-		Pod:              algRes.Pod,
-		Status:           algRes.Status,
-		SelectedNodeName: algRes.ScheduleResult.SuggestedHost,
+		Pod:              algRes.GetPod(),
+		Status:           algRes.GetStatus(),
+		SelectedNodeName: algRes.GetNodeName(),
 	}
 }
 
@@ -289,11 +289,11 @@ func (s *ClusterSnapshot) schedulePods(ctx context.Context, pods iter.Seq[*v1.Po
 			return result, err
 		}
 
-		if res.Status.IsSuccess() {
+		if res.GetStatus().IsSuccess() {
 			// The pod object is a copy made within the simulation library. It is not modified by
 			// scheduleOnePod, but it is returned in the result object. To make the result placement
 			// visible to the caller, pod.Spec.NodeName needs to be set.
-			pod.Spec.NodeName = res.ScheduleResult.SuggestedHost
+			pod.Spec.NodeName = res.GetNodeName()
 		}
 
 		if revertFn != nil {
@@ -301,7 +301,7 @@ func (s *ClusterSnapshot) schedulePods(ctx context.Context, pods iter.Seq[*v1.Po
 		}
 		result = append(result, schedulingResult(res))
 
-		if !res.Status.IsSuccess() {
+		if !res.GetStatus().IsSuccess() {
 			if opts.StopOnFailure {
 				return result, nil
 			}
@@ -410,4 +410,70 @@ func (s *ClusterSnapshot) Unpreempt(u *Unpreemption) ([]*v1.Pod, error) {
 	}
 
 	return u.pods, nil
+}
+
+// ScheduleWorkload schedules the given pods belonging to the same hierarchy using the workload-aware scheduling algorithm.
+// If the pods do not belong to the same hierarchy, it returns an error.
+// The order of the returned SchedulingResult slice is non-deterministic with respect to the input pods order.
+func (s *ClusterSnapshot) ScheduleWorkload(ctx context.Context, pods []*v1.Pod, opts ScheduleWorkloadOptions) (_ []SchedulingResult, err error) {
+	if len(pods) == 0 {
+		return nil, nil
+	}
+
+	initialStateVersion := s.undoLog.stateVersion
+
+	defer func() {
+		if err != nil || opts.DryRun {
+			s.undoLog.restoreState(initialStateVersion)
+		}
+		if initialStateVersion != s.undoLog.stateVersion {
+			s.stateVersionForPreemption++
+		}
+	}()
+
+	podGroupInfo, err := buildPodGroupHierarchy(s.schedulerSnapshot, pods)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build pod group hierarchy: %w", err)
+	}
+
+	schedFramework, err := s.profiles.FrameworkForPodGroup(podGroupInfo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get framework for pod group: %w", err)
+	}
+
+	sched := upstreamsync.NewScheduler(s.schedulerSnapshot, 0, 0, 1)
+	podGroupCycleState := framework.NewCycleState()
+	algResultsMap, revertFn := sched.RunRootSchedulingAlgorithm(ctx, schedFramework, podGroupCycleState, podGroupInfo)
+
+	if revertFn != nil {
+		s.undoLog.registerOperation(revertFn)
+	}
+
+	rootKey := getEntityKey(podGroupInfo)
+	rootResult := algResultsMap[rootKey]
+	isRootSuccess := rootResult.Status.IsSuccess()
+
+	var results []SchedulingResult
+	for _, groupResult := range algResultsMap {
+		for _, pRes := range groupResult.PodResults {
+			status := pRes.GetStatus()
+			nodeName := pRes.GetNodeName()
+			pod := pRes.GetPod()
+			if isRootSuccess && status.IsSuccess() {
+				pod.Spec.NodeName = nodeName
+			} else {
+				nodeName = ""
+				if !isRootSuccess && status.IsSuccess() {
+					status = rootResult.Status
+				}
+			}
+			results = append(results, SchedulingResult{
+				Pod:              pod,
+				Status:           status,
+				SelectedNodeName: nodeName,
+			})
+		}
+	}
+
+	return results, nil
 }

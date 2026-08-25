@@ -100,3 +100,15 @@ type Unpreemption struct {
 	// preemption. Unpreempt refuses to run once the snapshot has moved past it.
 	validPreemptionVersion uint64
 }
+
+// ScheduleWorkloadOptions contains options for scheduling a workload.
+type ScheduleWorkloadOptions struct {
+	CommonSchedulingOptions
+}
+
+// NewScheduleWorkloadOptions builds the ScheduleWorkloadOptions used by ScheduleWorkload.
+func NewScheduleWorkloadOptions(dryRun bool) ScheduleWorkloadOptions {
+	return ScheduleWorkloadOptions{
+		CommonSchedulingOptions: CommonSchedulingOptions{DryRun: dryRun},
+	}
+}
