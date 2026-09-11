@@ -21,7 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/klog/v2"
-	schedulerapi "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 	testutils "k8s.io/kubernetes/test/integration/util"
 	"sigs.k8s.io/scheduler-library/pkg/simulator"
@@ -58,29 +57,7 @@ func TestSimulatorIntegrationFlow(t *testing.T) {
 	informerFactory := informers.NewSharedInformerFactory(client, 0)
 
 	// 3. Create the SchedulingSimulator
-	cfg := &schedulerapi.KubeSchedulerConfiguration{
-		Profiles: []schedulerapi.KubeSchedulerProfile{
-			{
-				SchedulerName: v1.DefaultSchedulerName,
-				Plugins: &schedulerapi.Plugins{
-					QueueSort: schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "PrioritySort"}}},
-					PreFilter: schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "NodeResourcesFit"}}},
-					Filter:    schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "NodeResourcesFit"}}},
-					Bind:      schedulerapi.PluginSet{Enabled: []schedulerapi.Plugin{{Name: "DefaultBinder"}}},
-				},
-				PluginConfig: []schedulerapi.PluginConfig{
-					{
-						Name: "NodeResourcesFit",
-						Args: &schedulerapi.NodeResourcesFitArgs{
-							ScoringStrategy: &schedulerapi.ScoringStrategy{
-								Type: schedulerapi.LeastAllocated,
-							},
-						},
-					},
-				},
-			},
-		},
-	}
+	cfg := newKubeSchedulerConfig()
 
 	readonlyClient, err := simulator.NewReadonlyClient(testCtx.KubeConfig)
 	if err != nil {

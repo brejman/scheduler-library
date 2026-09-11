@@ -23,12 +23,15 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	v1 "k8s.io/api/core/v1"
+	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
+	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/backend/cache"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 	ft "sigs.k8s.io/scheduler-library/pkg/framework/testing"
+	testutils "sigs.k8s.io/scheduler-library/pkg/upstreamsync/testutils"
 )
 
 type stepContext struct {
@@ -121,6 +124,44 @@ func schedule(podNames []string, candidateNodes []string, opts SchedulePodsOptio
 		_, err = sc.cs.SchedulePods(sc.ctx, pods, placement, opts)
 		if err != nil {
 			t.Fatalf("SchedulePods(%v) unexpected error: %v", podNames, err)
+		}
+	}
+}
+
+func scheduleWorkload(podNames []string, opts ScheduleWorkloadOptions, wantSuccess bool) stepFn {
+	return func(t *testing.T, sc *stepContext) {
+		t.Helper()
+		var pods []*v1.Pod
+		for _, name := range podNames {
+			p, ok := sc.pods[name]
+			if !ok {
+				t.Fatalf("scheduleWorkload: pod %q not found in stepContext", name)
+			}
+			pods = append(pods, p)
+		}
+		results, err := sc.cs.ScheduleWorkload(sc.ctx, pods, opts)
+		if wantSuccess {
+			if err != nil {
+				t.Fatalf("ScheduleWorkload(%v) unexpected error: %v", podNames, err)
+			}
+			for i, res := range results {
+				if !res.Status.IsSuccess() {
+					t.Fatalf("ScheduleWorkload(%v) result[%d] unexpected failure status: %v", podNames, i, res.Status)
+				}
+			}
+		} else {
+			if err == nil {
+				allSucceeded := len(results) > 0
+				for _, res := range results {
+					if !res.Status.IsSuccess() {
+						allSucceeded = false
+						break
+					}
+				}
+				if allSucceeded {
+					t.Fatalf("ScheduleWorkload(%v) expected failure status, but all succeeded: %v", podNames, results)
+				}
+			}
 		}
 	}
 }
@@ -1174,5 +1215,278 @@ func TestResetMutations_NodeGenerationRestored(t *testing.T) {
 	// Compare generations after reset with initial generations
 	if diff := cmp.Diff(initialGenerations, getGenerations()); diff != "" {
 		t.Errorf("Generations don't match (-want +got):\n%s", diff)
+	}
+}
+
+func TestScheduleWorkload(t *testing.T) {
+	ctx := context.Background()
+
+	node4CPU := st.MakeNode().Name("node1").Capacity(map[v1.ResourceName]string{
+		v1.ResourceCPU:    "4",
+		v1.ResourceMemory: "4Gi",
+		v1.ResourcePods:   "10",
+	}).Obj()
+	node8CPU := st.MakeNode().Name("node1").Capacity(map[v1.ResourceName]string{
+		v1.ResourceCPU:    "8",
+		v1.ResourceMemory: "8Gi",
+		v1.ResourcePods:   "10",
+	}).Obj()
+
+	gangPG := testutils.MakeGangPodGroup("gang-pg", "", 2)
+	disjointPG := testutils.MakeGangPodGroup("disjoint-pg", "", 1)
+
+	rootCPG := testutils.MakeGangCompositePodGroup("root-cpg", "", 2)
+	leafPG1 := testutils.MakeGangPodGroup("leaf-1", "root-cpg", 1)
+	leafPG2 := testutils.MakeGangPodGroup("leaf-2", "root-cpg", 1)
+
+	pod1 := testutils.MakePod("pod1", "gang-pg", "2")
+	pod2 := testutils.MakePod("pod2", "gang-pg", "2")
+
+	heavyPod1 := testutils.MakePod("hp1", "gang-pg", "3")
+	heavyPod2 := testutils.MakePod("hp2", "gang-pg", "3")
+
+	leafPod1 := testutils.MakePod("lp1", "leaf-1", "2")
+	leafPod2 := testutils.MakePod("lp2", "leaf-2", "2")
+
+	disjointPod := testutils.MakePod("dp", "disjoint-pg", "1")
+	noPGPod := testutils.MakePod("no-pg", "", "")
+	missingPGPod := testutils.MakePod("missing-pg", "missing-pg-name", "")
+
+	tests := []struct {
+		name                string
+		nodes               []*v1.Node
+		podGroups           []*schedulingv1beta1.PodGroup
+		compositePodGroups  []*schedulingv1alpha3.CompositePodGroup
+		pods                []*v1.Pod
+		opts                ScheduleWorkloadOptions
+		expectResults       []SchedulingResult
+		expectSnapshotState map[string]sets.Set[string]
+		expectErr           bool
+	}{
+		{
+			name:               "Success - schedule flat pod group",
+			nodes:              []*v1.Node{node8CPU},
+			podGroups:          []*schedulingv1beta1.PodGroup{gangPG},
+			compositePodGroups: nil,
+			pods:               []*v1.Pod{pod1, pod2},
+			opts:               NewScheduleWorkloadOptions(false),
+			expectResults: []SchedulingResult{
+				{Pod: pod1, SelectedNodeName: "node1", Status: fwk.NewStatus(fwk.Success)},
+				{Pod: pod2, SelectedNodeName: "node1", Status: fwk.NewStatus(fwk.Success)},
+			},
+			expectSnapshotState: map[string]sets.Set[string]{"node1": sets.New("pod1", "pod2")},
+		},
+		{
+			name:               "Success - schedule composite pod group",
+			nodes:              []*v1.Node{node8CPU},
+			podGroups:          []*schedulingv1beta1.PodGroup{leafPG1, leafPG2},
+			compositePodGroups: []*schedulingv1alpha3.CompositePodGroup{rootCPG},
+			pods:               []*v1.Pod{leafPod1, leafPod2},
+			opts:               NewScheduleWorkloadOptions(false),
+			expectResults: []SchedulingResult{
+				{Pod: leafPod1, SelectedNodeName: "node1", Status: fwk.NewStatus(fwk.Success)},
+				{Pod: leafPod2, SelectedNodeName: "node1", Status: fwk.NewStatus(fwk.Success)},
+			},
+			expectSnapshotState: map[string]sets.Set[string]{"node1": sets.New("lp1", "lp2")},
+		},
+		{
+			name:               "DryRun - returns results without persisting to snapshot",
+			nodes:              []*v1.Node{node8CPU},
+			podGroups:          []*schedulingv1beta1.PodGroup{gangPG},
+			compositePodGroups: nil,
+			pods:               []*v1.Pod{pod1, pod2},
+			opts:               NewScheduleWorkloadOptions(true),
+			expectResults: []SchedulingResult{
+				{Pod: pod1, SelectedNodeName: "node1", Status: fwk.NewStatus(fwk.Success)},
+				{Pod: pod2, SelectedNodeName: "node1", Status: fwk.NewStatus(fwk.Success)},
+			},
+			expectSnapshotState: map[string]sets.Set[string]{"node1": nil},
+		},
+		{
+			name:               "Failure - gang unschedulable rolls back snapshot reservations",
+			nodes:              []*v1.Node{node4CPU},
+			podGroups:          []*schedulingv1beta1.PodGroup{gangPG},
+			compositePodGroups: nil,
+			pods:               []*v1.Pod{heavyPod1, heavyPod2},
+			opts:               NewScheduleWorkloadOptions(false),
+			expectResults: []SchedulingResult{
+				{Pod: heavyPod1, SelectedNodeName: "", Status: fwk.NewStatus(fwk.Unschedulable, "no pods were schedulable")},
+				{Pod: heavyPod2, SelectedNodeName: "", Status: fwk.NewStatus(fwk.Unschedulable, "pod group is unschedulable")},
+			},
+			expectSnapshotState: map[string]sets.Set[string]{"node1": nil},
+		},
+		{
+			name:                "Empty pod list returns nil",
+			nodes:               []*v1.Node{node8CPU},
+			podGroups:           []*schedulingv1beta1.PodGroup{gangPG},
+			compositePodGroups:  nil,
+			pods:                nil,
+			opts:                NewScheduleWorkloadOptions(false),
+			expectResults:       nil,
+			expectSnapshotState: map[string]sets.Set[string]{"node1": nil},
+		},
+		{
+			name:                "Validation error - pod not member of any PodGroup",
+			nodes:               []*v1.Node{node8CPU},
+			podGroups:           []*schedulingv1beta1.PodGroup{gangPG},
+			compositePodGroups:  nil,
+			pods:                []*v1.Pod{noPGPod},
+			opts:                NewScheduleWorkloadOptions(false),
+			expectResults:       nil,
+			expectSnapshotState: map[string]sets.Set[string]{"node1": nil},
+			expectErr:           true,
+		},
+		{
+			name:                "Validation error - pod group not found in snapshot",
+			nodes:               []*v1.Node{node8CPU},
+			podGroups:           []*schedulingv1beta1.PodGroup{gangPG},
+			compositePodGroups:  nil,
+			pods:                []*v1.Pod{missingPGPod},
+			opts:                NewScheduleWorkloadOptions(false),
+			expectResults:       nil,
+			expectSnapshotState: map[string]sets.Set[string]{"node1": nil},
+			expectErr:           true,
+		},
+		{
+			name:                "Validation error - pods belong to disjoint hierarchies",
+			nodes:               []*v1.Node{node8CPU},
+			podGroups:           []*schedulingv1beta1.PodGroup{gangPG, disjointPG},
+			compositePodGroups:  nil,
+			pods:                []*v1.Pod{pod1, disjointPod},
+			opts:                NewScheduleWorkloadOptions(false),
+			expectResults:       nil,
+			expectSnapshotState: map[string]sets.Set[string]{"node1": nil},
+			expectErr:           true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profileMap, snap, err := ft.SetupSnapshotTestWithPodGroups(
+				t,
+				ctx,
+				nil,
+				tt.nodes,
+				tt.podGroups,
+				tt.compositePodGroups,
+			)
+			if err != nil {
+				t.Fatalf("SetupSnapshotTestWithPodGroups failed: %v", err)
+			}
+			cs := New(snap, profileMap)
+
+			results, err := cs.ScheduleWorkload(ctx, tt.pods, tt.opts)
+			if (err != nil) != tt.expectErr {
+				t.Fatalf("ScheduleWorkload() error = %v, expectErr %v", err, tt.expectErr)
+			}
+
+			if !tt.expectErr && len(tt.expectResults) > 0 {
+				if len(results) != len(tt.expectResults) {
+					t.Fatalf("ScheduleWorkload() got %d results, want %d", len(results), len(tt.expectResults))
+				}
+				for i := range results {
+					if results[i].SelectedNodeName != tt.expectResults[i].SelectedNodeName {
+						t.Errorf("result[%d] SelectedNodeName = %q, want %q", i, results[i].SelectedNodeName, tt.expectResults[i].SelectedNodeName)
+					}
+					if results[i].Status.IsSuccess() != tt.expectResults[i].Status.IsSuccess() {
+						t.Errorf("result[%d] Status.IsSuccess = %v, want %v", i, results[i].Status.IsSuccess(), tt.expectResults[i].Status.IsSuccess())
+					}
+				}
+			}
+
+			ft.VerifySnapshot(t, snap, tt.expectSnapshotState)
+		})
+	}
+}
+
+func TestSnapshot_ActionSequences_ScheduleWorkload(t *testing.T) {
+	ctx := context.Background()
+
+	node1 := st.MakeNode().Name("node1").Capacity(map[v1.ResourceName]string{
+		v1.ResourceCPU:    "4",
+		v1.ResourceMemory: "4Gi",
+		v1.ResourcePods:   "10",
+	}).Obj()
+
+	pg1 := testutils.MakeGangPodGroup("gang-pg1", "", 2)
+	pg2 := testutils.MakeGangPodGroup("gang-pg2", "", 2)
+
+	pod1 := testutils.MakePod("pod1", "gang-pg1", "2")
+	pod2 := testutils.MakePod("pod2", "gang-pg1", "2")
+	pod3 := testutils.MakePod("pod3", "gang-pg2", "2")
+	pod4 := testutils.MakePod("pod4", "gang-pg2", "2")
+
+	extraPod := testutils.MakePod("extra-pod", "", "1")
+
+	allPods := []*v1.Pod{pod1, pod2, pod3, pod4, extraPod}
+
+	tests := []struct {
+		name  string
+		steps []stepFn
+	}{
+		{
+			name: "ScheduleWorkload observes mutations",
+			steps: []stepFn{
+				schedule([]string{"extra-pod"}, []string{"node1"}, SchedulePodsOptions{}),
+				verifySnapshot(map[string]sets.Set[string]{"node1": sets.New("extra-pod")}),
+				scheduleWorkload([]string{"pod1", "pod2"}, NewScheduleWorkloadOptions(false) /* expect failure */, false),
+				verifySnapshot(map[string]sets.Set[string]{"node1": sets.New("extra-pod")}),
+				resetMutations(),
+				verifySnapshot(map[string]sets.Set[string]{"node1": sets.New[string]()}),
+				scheduleWorkload([]string{"pod1", "pod2"}, NewScheduleWorkloadOptions(false) /* expect success */, true),
+				verifySnapshot(map[string]sets.Set[string]{"node1": sets.New("pod1", "pod2")}),
+			},
+		},
+		{
+			name: "Transactional ScheduleWorkload reservations are undone on revert",
+			steps: []stepFn{
+				inTransaction(Revert,
+					scheduleWorkload([]string{"pod1", "pod2"}, NewScheduleWorkloadOptions(false) /* expect success */, true),
+					verifySnapshot(map[string]sets.Set[string]{"node1": sets.New("pod1", "pod2")}),
+				),
+				verifySnapshot(map[string]sets.Set[string]{"node1": sets.New[string]()}),
+			},
+		},
+		{
+			name: "ScheduleWorkload reservations on snapshot are persisted across calls",
+			steps: []stepFn{
+				scheduleWorkload([]string{"pod1", "pod2"}, NewScheduleWorkloadOptions(false) /* expect success */, true),
+				verifySnapshot(map[string]sets.Set[string]{"node1": sets.New("pod1", "pod2")}),
+				scheduleWorkload([]string{"pod3", "pod4"}, NewScheduleWorkloadOptions(false) /* expect failure */, false),
+				verifySnapshot(map[string]sets.Set[string]{"node1": sets.New("pod1", "pod2")}),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			podMap := make(map[string]*v1.Pod)
+			for _, p := range allPods {
+				podMap[p.Name] = p.DeepCopy()
+			}
+
+			profileMap, snap, err := ft.SetupSnapshotTestWithPodGroups(
+				t,
+				ctx,
+				nil,
+				[]*v1.Node{node1},
+				[]*schedulingv1beta1.PodGroup{pg1, pg2},
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("SetupSnapshotTestWithPodGroups failed: %v", err)
+			}
+			cs := New(snap, profileMap)
+			sc := &stepContext{
+				ctx:     ctx,
+				cs:      cs,
+				snap:    snap,
+				pods:    podMap,
+				handles: make(map[string]*Unpreemption),
+			}
+			for _, step := range tc.steps {
+				step(t, sc)
+			}
+		})
 	}
 }
