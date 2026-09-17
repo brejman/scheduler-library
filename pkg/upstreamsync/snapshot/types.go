@@ -15,6 +15,8 @@
 package snapshot
 
 import (
+	"iter"
+
 	v1 "k8s.io/api/core/v1"
 	fwk "k8s.io/kube-scheduler/framework"
 )
@@ -104,6 +106,7 @@ type Unpreemption struct {
 // ScheduleWorkloadOptions contains options for scheduling a workload.
 type ScheduleWorkloadOptions struct {
 	CommonSchedulingOptions
+	WorkloadPreemptionOptions
 }
 
 // NewScheduleWorkloadOptions builds the ScheduleWorkloadOptions used by ScheduleWorkload.
@@ -111,4 +114,33 @@ func NewScheduleWorkloadOptions(dryRun bool) ScheduleWorkloadOptions {
 	return ScheduleWorkloadOptions{
 		CommonSchedulingOptions: CommonSchedulingOptions{DryRun: dryRun},
 	}
+}
+
+// PreemptionVictim is an atomic unit of preemption, which can contain 1 or more pods.
+type PreemptionVictim = []*v1.Pod
+
+// WorkloadPreemptionOptions allows customization of preemption logic.
+type WorkloadPreemptionOptions struct {
+	// PotentialVictims is an iterator of atomic victims that could be removed to fit the workload,
+	// ordered from least to most valuable.
+	// Empty or nil value will be interpreted as no potential victims.
+	PotentialVictims iter.Seq[PreemptionVictim]
+	// PreExistingVictims is a set of pods which have already been selected for preemption.
+	// Empty or nil value will be interpreted as no pre-existing victims.
+	PreExistingVictims []*v1.Pod
+}
+
+// WorkloadSchedulingResult is the result of the ScheduleWorkload operation.
+type WorkloadSchedulingResult struct {
+	// Status is status of the scheduling without preemption or error.
+	// If status is not successful or dry-run flag is set, the results won't be saved to snapshot.
+	// If preemption was successful, [WorkloadSchedulingResult.PodResults] and [WorkloadSchedulingResult.PreemptionVictims] will be set.
+	Status *fwk.Status
+	// PodResults stores assignments from pods to nodes.
+	// If scheduling or preemption was unsuccessful, this will be empty.
+	// It is a subset of pods specified in the input.
+	PodResults []SchedulingResult
+	// PreemptionVictims is the final set of victims determined by the scheduling algorithm to be required for the workload to fit.
+	// It is a subset of victims specified in [WorkloadPreemptionOptions].
+	PreemptionVictims []PreemptionVictim
 }
