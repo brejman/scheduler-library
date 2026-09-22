@@ -170,8 +170,8 @@ func TestRunRootSchedulingAlgorithm(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			profileMap, snap, err := ft.SetupSnapshotTestWithPodGroups(
-				t,
 				ctx,
+				t,
 				nil,
 				tt.nodes,
 				tt.podGroups,

@@ -346,7 +346,7 @@ func TestScheduleOnePod(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cs, snap, _ := setupSnapshotTest(t, ctx, tc.nodes, nil)
+			cs, snap, _ := setupSnapshotTest(ctx, t, tc.nodes, nil)
 
 			placement, err := cs.MakePlacement([]string{tc.candidate})
 			if err != nil {
@@ -394,16 +394,14 @@ func TestScheduleOnePod(t *testing.T) {
 				if len(nodeInfo.GetPods()) != 0 {
 					t.Errorf("expected 0 pods on node after revert, got %d", len(nodeInfo.GetPods()))
 				}
-			} else {
-				if revertFn != nil {
-					t.Error("expected revertFn to be nil")
-				}
+			} else if revertFn != nil {
+				t.Error("expected revertFn to be nil")
 			}
 		})
 	}
 }
 
-func setupSnapshotTest(t *testing.T, ctx context.Context, nodes []*v1.Node, pods []*v1.Pod) (*ClusterSnapshot, *cache.Snapshot, *upstreamsync.ProfileMap) {
+func setupSnapshotTest(ctx context.Context, t *testing.T, nodes []*v1.Node, pods []*v1.Pod) (*ClusterSnapshot, *cache.Snapshot, *upstreamsync.ProfileMap) {
 	profiles, snap, err := ft.SetupSnapshotTest(ctx, pods, nodes)
 	if err != nil {
 		t.Fatalf("Failed to set up snapshot: %v", err)

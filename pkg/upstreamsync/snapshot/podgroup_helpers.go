@@ -16,6 +16,7 @@ package snapshot
 
 import (
 	"fmt"
+	"maps"
 
 	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
@@ -179,9 +180,7 @@ func buildHierarchy(
 
 	// Create a copy of podGroupInfosMap, to avoid concurrent modifications on podGroupInfosMap.
 	treeNodes := make(map[fwk.EntityKey]*framework.PodGroupInfo, len(podGroupInfosMap))
-	for key, info := range podGroupInfosMap {
-		treeNodes[key] = info
-	}
+	maps.Copy(treeNodes, podGroupInfosMap)
 
 	for _, podGroupInfo := range podGroupInfosMap {
 		parentCompositePodGroupName := podGroupInfo.PodGroup.Spec.ParentCompositePodGroupName

@@ -149,18 +149,16 @@ func scheduleWorkload(podNames []string, opts ScheduleWorkloadOptions, wantSucce
 					t.Fatalf("ScheduleWorkload(%v) result[%d] unexpected failure status: %v", podNames, i, res.Status)
 				}
 			}
-		} else {
-			if err == nil {
-				allSucceeded := len(results) > 0
-				for _, res := range results {
-					if !res.Status.IsSuccess() {
-						allSucceeded = false
-						break
-					}
+		} else if err == nil {
+			allSucceeded := len(results) > 0
+			for _, res := range results {
+				if !res.Status.IsSuccess() {
+					allSucceeded = false
+					break
 				}
-				if allSucceeded {
-					t.Fatalf("ScheduleWorkload(%v) expected failure status, but all succeeded: %v", podNames, results)
-				}
+			}
+			if allSucceeded {
+				t.Fatalf("ScheduleWorkload(%v) expected failure status, but all succeeded: %v", podNames, results)
 			}
 		}
 	}
@@ -549,7 +547,7 @@ func TestSnapshot_ActionSequences(t *testing.T) {
 				nodesForTest = append(nodesForTest, nodeMap[nodeName])
 			}
 
-			cs, snap, _ := setupSnapshotTest(t, ctx, nodesForTest, assignedPods)
+			cs, snap, _ := setupSnapshotTest(ctx, t, nodesForTest, assignedPods)
 			sc := &stepContext{
 				ctx:     ctx,
 				cs:      cs,
@@ -568,7 +566,7 @@ func TestMakePlacement(t *testing.T) {
 	node1 := st.MakeNode().Name("node1").Obj()
 	node2 := st.MakeNode().Name("node2").Obj()
 
-	cs, _, _ := setupSnapshotTest(t, context.Background(), []*v1.Node{node1, node2}, nil)
+	cs, _, _ := setupSnapshotTest(context.Background(), t, []*v1.Node{node1, node2}, nil)
 
 	placement, err := cs.MakePlacement([]string{"node1", "node2"})
 	if err != nil {
@@ -637,7 +635,7 @@ func TestCanSchedulePod(t *testing.T) {
 				}).Obj()
 			}
 
-			cs, _, _ := setupSnapshotTest(t, ctx, snapshotNodes, nil)
+			cs, _, _ := setupSnapshotTest(ctx, t, snapshotNodes, nil)
 
 			podBuilder := st.MakePod().Name("pod1").Namespace("default").UID("uid-pod1").SchedulerName(tc.schedulerName)
 			if tc.podRequestCPU != "" {
@@ -913,7 +911,7 @@ func TestSchedulePods(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 
-			cs, snap, _ := setupSnapshotTest(t, ctx, tc.nodes, nil)
+			cs, snap, _ := setupSnapshotTest(ctx, t, tc.nodes, nil)
 
 			placement, err := cs.MakePlacement(tc.candidateNodes)
 			if err != nil && !tc.expectErr {
@@ -965,7 +963,7 @@ func TestSchedulePodsResultFeedsPreemptPods(t *testing.T) {
 	node := st.MakeNode().Name("node1").Capacity(map[v1.ResourceName]string{v1.ResourcePods: "1"}).Obj()
 	pod := st.MakePod().Name("pod1").Namespace("default").UID("uid-pod1").Obj()
 
-	cs, snap, _ := setupSnapshotTest(t, ctx, []*v1.Node{node}, nil)
+	cs, snap, _ := setupSnapshotTest(ctx, t, []*v1.Node{node}, nil)
 	placement, err := cs.MakePlacement([]string{"node1"})
 	if err != nil {
 		t.Fatalf("MakePlacement() error = %v", err)
@@ -1134,7 +1132,7 @@ func TestSchedulePodsByTemplate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 
-			cs, snap, _ := setupSnapshotTest(t, ctx, tc.nodes, nil)
+			cs, snap, _ := setupSnapshotTest(ctx, t, tc.nodes, nil)
 
 			placement, err := cs.MakePlacement(tc.candidateNodes)
 			if err != nil && !tc.expectErr {
@@ -1177,7 +1175,7 @@ func TestResetMutations_NodeGenerationRestored(t *testing.T) {
 	pod2 := st.MakePod().Name("pod2").Namespace("default").UID("uid-pod2").Node("node2").Obj()
 	pod3 := st.MakePod().Name("pod3").Namespace("default").UID("uid-pod3").Obj()
 
-	cs, snap, _ := setupSnapshotTest(t, ctx, []*v1.Node{node1, node2}, []*v1.Pod{pod1, pod2})
+	cs, snap, _ := setupSnapshotTest(ctx, t, []*v1.Node{node1, node2}, []*v1.Pod{pod1, pod2})
 
 	getGenerations := func() map[string]int64 {
 		t.Helper()
@@ -1367,8 +1365,8 @@ func TestScheduleWorkload(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			profileMap, snap, err := ft.SetupSnapshotTestWithPodGroups(
-				t,
 				ctx,
+				t,
 				nil,
 				tt.nodes,
 				tt.podGroups,
@@ -1470,8 +1468,8 @@ func TestSnapshot_ActionSequences_ScheduleWorkload(t *testing.T) {
 			}
 
 			profileMap, snap, err := ft.SetupSnapshotTestWithPodGroups(
-				t,
 				ctx,
+				t,
 				nil,
 				[]*v1.Node{node1},
 				[]*schedulingv1beta1.PodGroup{pg1, pg2},

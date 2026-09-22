@@ -62,6 +62,7 @@ see pkg/upstreamsync/doc.go.
 
 */
 
+// FrameworkCapturer is a callback used to inspect constructed scheduling frameworks.
 type FrameworkCapturer = scheduler.FrameworkCapturer
 
 type frameworkOptions struct {
@@ -73,6 +74,7 @@ type frameworkOptions struct {
 	parallelism                int32
 }
 
+// Option configures framework construction in NewProfileMap.
 type Option = func(*frameworkOptions)
 
 // ProfileMap holds one framework.Framework per scheduler name.
@@ -118,6 +120,7 @@ func (p *ProfileMap) FrameworkForPodGroup(podGroupInfo *framework.PodGroupInfo) 
 	return p.FrameworkForPod(pods[0])
 }
 
+// WithProfiles configures the scheduler profiles to build in NewProfileMap.
 func WithProfiles(p ...schedulerapi.KubeSchedulerProfile) Option {
 	return func(o *frameworkOptions) {
 		o.profiles = p
