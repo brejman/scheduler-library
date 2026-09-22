@@ -2,15 +2,126 @@
 # see: https://golangci-lint.run/usage/configuration/
 
 version: "2"
-linters:
-  enable:
-    - goheader
 
-  settings:
+linters:
+  default: none
+  enable: # please keep this alphabetized
+    - copyloopvar
+    - depguard
+    - errcheck
+    - errorlint
+    - forbidigo
+    - gocritic
+    - goheader
+    - govet
+    - ineffassign
+    - loggercheck
+    - misspell
+    - modernize
+    - nolintlint
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - usestdlibvars
+
+  exclusions:
+    rules:
+      # https://github.com/kubernetes/kubernetes/issues/117288#issuecomment-1507012435
+      - linters:
+          - gocritic
+        text: "ifElseChain: rewrite if-else to switch statement"
+
+      # SSA Extract calls are allowed in tests.
+      - linters:
+          - forbidigo
+        text: should not be used because managedFields was removed
+        path: _test\.go$
+
+      # Adding unversioned feature gates is allowed in tests.
+      - linters:
+          - forbidigo
+        text: should not use Add, use AddVersioned instead
+        path: _test\.go$
+
+  settings: # please keep this alphabetized
+    depguard:
+      rules:
+        utils:
+          files:
+            - $all
+          deny:
+            - pkg: "k8s.io/utils/pointer"
+              desc: "k8s.io/utils/pointer shall no longer be used, please use k8s.io/utils/ptr."
+        test-frameworks:
+          files:
+            - $all
+          deny:
+            - pkg: "github.com/stretchr/testify"
+              desc: "testify shall not be used; use standard testing and cmp.Diff."
+            - pkg: "github.com/onsi/ginkgo"
+              desc: "ginkgo shall not be used in unit or integration tests; use standard testing."
+            - pkg: "github.com/onsi/gomega"
+              desc: "gomega shall not be used in unit or integration tests; use standard testing and cmp.Diff."
+        go-cmp:
+          files:
+            - $all
+            - "!$test"
+            - "!**/test/**"
+            - "!**/testing/**"
+          deny:
+            - pkg: "github.com/google/go-cmp/cmp"
+              desc: "cmp is allowed only in test files"
+            - pkg: "html/template"
+              desc: "template is allowed only in test files as it disables dead code elimination"
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: \.AnnotatedEventf$
+          msg: "Do not use AnnotatedEventf. Events are fire-and-forget and aggressively throttled; do not rely on them to pass state or metadata for programmatic triggers."
+        - pattern: md5\.*
+          msg: "md5 is outdated, insecure, prefer a secure hash (such as sha256) or a non-cryptographic hash"
+        - pattern: ^managedfields\.ExtractInto$
+          pkg: ^k8s\.io/apimachinery/pkg/util/managedfields$
+          msg: "should not be used because managedFields was removed"
+        - pattern: \.Extract
+          pkg: ^k8s\.io/client-go/applyconfigurations/
+          msg: "should not be used because managedFields was removed"
+        - pattern: \.Add$
+          pkg: ^k8s\.io/component-base/featuregate$
+          msg: "should not use Add, use AddVersioned instead"
+        - pattern: ^reflect\.DeepEqual$
+          pkg: ^reflect$
+          msg: "Do not use reflect.DeepEqual; use cmp.Diff instead."
+        - pattern: ^klog\.(Info|Infof|Infoln|InfoS|Error|Errorf|Errorln|ErrorS|Warning|Warningf|Warningln|Fatal|Fatalf|Fatalln)$
+          pkg: ^k8s\.io/klog/v2$
+          msg: "Use contextual logging via klog.FromContext(ctx) instead of global klog functions."
+    gocritic:
+      enabled-checks:
+        - boolExprSimplify
+        - equalFold
     goheader:
       template-path: ${config-path}/hack/boilerplate.txt
+    modernize:
+      disable:
+        - any
+        - omitzero
+        - stringsbuilder
+        - testingcontext
+    revive:
+      rules:
+        - name: context-as-argument
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+    staticcheck:
+      checks:
+        - "all"
+        - "-QF1008" # Omit embedded fields from selector expression
+        - "-ST1000" # Incorrect or missing package comment
 
 formatters:
   enable:
     - gofmt
     - goimports
+
