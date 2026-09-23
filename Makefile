@@ -37,6 +37,7 @@ fmt:
 
 .PHONY: lint
 lint:
+	$(GOLANGCI_LINT) config verify
 	$(GOLANGCI_LINT) run ./...
 
 .PHONY: verify

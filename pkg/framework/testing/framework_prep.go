@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/scheduler-library/pkg/upstreamsync"
 )
 
+// SetupSnapshotTest initializes a fake clientset, snapshot, and default profile map for unit tests.
 func SetupSnapshotTest(ctx context.Context, pods []*v1.Pod, nodes []*v1.Node) (*upstreamsync.ProfileMap, *cache.Snapshot, error) {
 	client := fake.NewClientset()
 	for _, n := range nodes {
@@ -101,8 +102,8 @@ func SetupSnapshotTest(ctx context.Context, pods []*v1.Pod, nodes []*v1.Node) (*
 // SetupSnapshotTestWithPodGroups populates the snapshot with nodes, pods, podgroups, and composite podgroups,
 // enables the feature gates for workload scheduling, and returns scheduler profile and snapshot.
 func SetupSnapshotTestWithPodGroups(
-	t testing.TB,
 	ctx context.Context,
+	t testing.TB,
 	pods []*v1.Pod,
 	nodes []*v1.Node,
 	podGroups []*schedulingv1beta1.PodGroup,

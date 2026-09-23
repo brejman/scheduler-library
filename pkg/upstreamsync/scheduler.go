@@ -57,6 +57,7 @@ or on the exact line that differs. See pkg/upstreamsync/doc.go and CONTRIBUTING.
 
 */
 
+// ScheduleResult represents the result of scheduling a pod.
 type ScheduleResult = scheduler.ScheduleResult
 
 // Scheduler holds the state a single scheduling attempt needs.
@@ -120,26 +121,36 @@ type AlgorithmResult struct {
 	cycleState     fwk.CycleState
 }
 
+// GetPod returns the pod associated with the algorithm result.
+//
 // UPSTREAM-DIFF: none, copied verbatim.
 func (ar *AlgorithmResult) GetPod() *v1.Pod {
 	return ar.pod
 }
 
+// GetPodInfo returns the PodInfo associated with the algorithm result.
+//
 // UPSTREAM-DIFF: none, copied verbatim.
 func (ar *AlgorithmResult) GetPodInfo() fwk.PodInfo {
 	return ar.podInfo
 }
 
+// GetNodeName returns the suggested host name from the algorithm result.
+//
 // UPSTREAM-DIFF: none, copied verbatim.
 func (ar *AlgorithmResult) GetNodeName() string {
 	return ar.scheduleResult.SuggestedHost
 }
 
+// GetCycleState returns the scheduling cycle state from the algorithm result.
+//
 // UPSTREAM-DIFF: none, copied verbatim.
 func (ar *AlgorithmResult) GetCycleState() fwk.CycleState {
 	return ar.cycleState
 }
 
+// GetStatus returns the scheduling status from the algorithm result.
+//
 // UPSTREAM-DIFF: Added getter since AlgorithmResult fields are unexported and status gets inspected beyond package boundaries.
 func (ar *AlgorithmResult) GetStatus() *fwk.Status {
 	return ar.status
@@ -165,9 +176,9 @@ func (sched *Scheduler) SchedulePod(ctx context.Context, schedFwk framework.Fram
 	scheduleResult, err := sched.schedulePod(ctx, schedFwk, podInfo)
 	if err != nil {
 		var status *fwk.Status
-		if err == scheduler.ErrNoNodesAvailable {
+		if errors.Is(err, scheduler.ErrNoNodesAvailable) {
 			status = fwk.NewStatus(fwk.UnschedulableAndUnresolvable).WithError(err)
-		} else if _, ok := err.(*framework.FitError); !ok {
+		} else if _, ok := errors.AsType[*framework.FitError](err); !ok {
 			status = fwk.AsStatus(err)
 		} else {
 			status = fwk.NewStatus(fwk.Unschedulable).WithError(err)

@@ -240,7 +240,7 @@ func (s *ClusterSnapshot) SchedulePodsByTemplate(ctx context.Context, template *
 	}
 
 	podIterator := func(yield func(*v1.Pod) bool) {
-		for i := 0; i < maxPods; i++ {
+		for i := range maxPods {
 			pod := createPodFromTemplate(template, i)
 			if !yield(pod) {
 				return
