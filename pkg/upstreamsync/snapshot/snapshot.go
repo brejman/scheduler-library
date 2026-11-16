@@ -26,6 +26,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/klog/v2"
@@ -462,29 +463,26 @@ func (s *ClusterSnapshot) Unpreempt(u *Unpreemption) ([]*v1.Pod, error) {
 // CompositePodGroup when using topology-aware scheduling or composite hierarchies). Custom scheduler
 // profiles should keep the GangScheduling plugin enabled (via MultiPoint or Permit, which registers its
 // PlacementFeasible extension point) for gang and basic quorum enforcement.
-//
-// Note: Virtual pods (input pods not present in the snapshot beforehand) are assumed on nodes,
-// but not added to internal pod group sets (allPods/assumedPods). Consequently,
-// PodGroupState.ScheduledPods() does not include virtual pods from previous ScheduleWorkload calls.
-// This is safe when evaluating an entire virtual workload in a single call (such as Kueue admission).
-// However, when scheduling a hierarchy incrementally across multiple ScheduleWorkload calls, plugins
-// that query ScheduledPods() (such as TAS or gang scheduling) do not observe virtual pods from earlier calls.
 func (s *ClusterSnapshot) ScheduleWorkload(ctx context.Context, pods []*v1.Pod, opts ScheduleWorkloadOptions) (result WorkloadSchedulingResult) {
 	if len(pods) == 0 {
 		return WorkloadSchedulingResult{Status: fwk.NewStatus(fwk.Success)}
 	}
 
 	initialStateVersion := s.undoLog.stateVersion
+	var unscheduledPodReverts map[types.UID]func()
 
 	defer func() {
 		if !result.Status.IsSuccess() || opts.DryRun {
 			s.undoLog.restoreState(initialStateVersion)
-		}
-		if result.Status.IsSuccess() && !opts.DryRun {
+		} else {
 			for _, r := range result.PodResults {
 				if r.SelectedNodeName != "" && r.Pod != nil {
 					r.Pod.Spec.NodeName = r.SelectedNodeName
+					delete(unscheduledPodReverts, r.Pod.UID)
 				}
+			}
+			for _, revertPodMember := range unscheduledPodReverts {
+				revertPodMember()
 			}
 		}
 		if initialStateVersion != s.undoLog.stateVersion {
@@ -500,6 +498,11 @@ func (s *ClusterSnapshot) ScheduleWorkload(ctx context.Context, pods []*v1.Pod, 
 	schedFramework, err := s.profiles.FrameworkForPodGroup(podGroupInfo)
 	if err != nil {
 		return WorkloadSchedulingResult{Status: fwk.AsStatus(fmt.Errorf("failed to get framework for pod group: %w", err))}
+	}
+
+	unscheduledPodReverts, err = s.addUnscheduledPodGroupMembers(ctx, pods)
+	if err != nil {
+		return WorkloadSchedulingResult{Status: fwk.AsStatus(err)}
 	}
 
 	// First, try scheduling without preemption with the nodes occupied by committed victims filtered out.
@@ -549,6 +552,31 @@ func (s *ClusterSnapshot) ScheduleWorkload(ctx context.Context, pods []*v1.Pod, 
 	// Third, try scheduling with preemption of the provided potential victims.
 	// Fit here means the workload needs to wait for new victims to be preempted.
 	return s.workloadPreemption(ctx, sched, schedFramework, rootCycleState, podGroupInfo, initialResult, opts)
+}
+
+func (s *ClusterSnapshot) addUnscheduledPodGroupMembers(ctx context.Context, pods []*v1.Pod) (map[types.UID]func(), error) {
+	logger := klog.FromContext(ctx)
+	unscheduledPodReverts := make(map[types.UID]func(), len(pods))
+	for _, pod := range pods {
+		podCopy := pod.DeepCopy()
+		podCopy.Spec.NodeName = ""
+		if err := s.addPodGroupMember(podCopy); err != nil {
+			return nil, fmt.Errorf("failed to add pod group member: %w", err)
+		}
+		reverted := false
+		revertPodMember := func() {
+			if reverted {
+				return
+			}
+			reverted = true
+			if err := s.removePodGroupMember(podCopy); err != nil {
+				logger.Error(err, "failed to remove pod group member during state revert", "pod", klog.KObj(podCopy))
+			}
+		}
+		unscheduledPodReverts[podCopy.UID] = revertPodMember
+		s.undoLog.registerOperation(revertPodMember)
+	}
+	return unscheduledPodReverts, nil
 }
 
 func (s *ClusterSnapshot) scheduleWorkloadWithoutPreemption(
@@ -770,17 +798,26 @@ func (s *ClusterSnapshot) RemoveCompositePodGroup(ctx context.Context, cpg *sche
 	return nil
 }
 
-// UPSTREAM-DIFF: Upstream kubernetes PR #142177 (https://github.com/kubernetes/kubernetes/pull/142177)
-// adds AddGenericPodGroup and RemoveGenericPodGroup directly to cache.Snapshot.
+// UPSTREAM-DIFF:
+//   - Upstream kubernetes PR #142177 (https://github.com/kubernetes/kubernetes/pull/142177)
+//     adds AddGenericPodGroup and RemoveGenericPodGroup directly to cache.Snapshot.
+//   - Upstream kubernetes PR #144202 (https://github.com/kubernetes/kubernetes/pull/144202)
+//     adds AddPodGroupMember, UpdatePodGroupMember, and RemovePodGroupMember directly to cache.Snapshot.
 //
 // Migration Plan:
-// When go.mod updates k8s.io/kubernetes to a version that includes PR #142177:
+// When go.mod updates k8s.io/kubernetes to a version that includes PR #142177 and PR #144202:
 // 1. Delete all reflection helper functions below:
 //    - writableField
 //    - addPodGroup
 //    - removePodGroup
 //    - addCompositePodGroup
 //    - removeCompositePodGroup
+//    - addPodGroupMember
+//    - updatePodGroupMember
+//    - removePodGroupMember
+//    - podGroupKeyOf
+//    - podGroupStateWithMember
+//    - bumpPodGroupGeneration
 //    - addChildToParent
 //    - removeChildFromParent
 //    - getOrCreatePodGroupState
@@ -792,11 +829,121 @@ func (s *ClusterSnapshot) RemoveCompositePodGroup(ctx context.Context, cpg *sche
 // 3. Change RemovePodGroup and RemoveCompositePodGroup to look up the existing object in the
 //    snapshot first, pass that existing object to s.schedulerSnapshot.RemoveGenericPodGroup,
 //    and store existing.DeepCopy() in the undo log.
-// 4. Keep the public ClusterSnapshot methods unchanged so callers do not break.
+// 4. Change addUnscheduledPodGroupMembers to call s.schedulerSnapshot.AddPodGroupMember
+//    and s.schedulerSnapshot.RemovePodGroupMember directly.
+// 5. Keep the public ClusterSnapshot methods unchanged so callers do not break.
 
 func writableField(v reflect.Value, name string) reflect.Value {
 	f := v.FieldByName(name)
 	return reflect.NewAt(f.Type(), f.Addr().UnsafePointer()).Elem()
+}
+
+func podGroupKeyOf(rv reflect.Value, pod *v1.Pod) (fwk.EntityKey, error) {
+	if !rv.FieldByName("genericWorkloadEnabled").Bool() {
+		return fwk.EntityKey{}, fmt.Errorf("generic workload feature gate is disabled")
+	}
+	if pod.Spec.SchedulingGroup == nil || pod.Spec.SchedulingGroup.PodGroupName == nil {
+		return fwk.EntityKey{}, fmt.Errorf("pod %s does not belong to a pod group", klog.KObj(pod))
+	}
+	return fwk.PodGroupKey(pod.Namespace, *pod.Spec.SchedulingGroup.PodGroupName), nil
+}
+
+func podGroupStateWithMember(rv reflect.Value, key fwk.EntityKey, pod *v1.Pod) (reflect.Value, error) {
+	pgsMap := writableField(rv, "podGroupStates")
+	pgs := pgsMap.MapIndex(reflect.ValueOf(key))
+	if !pgs.IsValid() {
+		return reflect.Value{}, fmt.Errorf("pod group state %s not found in snapshot", key)
+	}
+	allPods := writableField(pgs.Elem(), "allPods").Interface().(map[types.UID]*v1.Pod)
+	if _, ok := allPods[pod.UID]; !ok {
+		return reflect.Value{}, fmt.Errorf("pod %s not found in pod group state %s", klog.KObj(pod), key)
+	}
+	return pgs, nil
+}
+
+func bumpPodGroupGeneration(pgs reflect.Value) {
+	gen := writableField(pgs.Elem(), "generation")
+	if gen.Int() >= 0 {
+		gen.SetInt(-1)
+	} else {
+		gen.SetInt(gen.Int() - 1)
+	}
+}
+
+func (s *ClusterSnapshot) addPodGroupMember(pod *v1.Pod) error {
+	rv := reflect.ValueOf(s.schedulerSnapshot).Elem()
+	key, err := podGroupKeyOf(rv, pod)
+	if err != nil {
+		return err
+	}
+	pgsMap := writableField(rv, "podGroupStates")
+	pgs := pgsMap.MapIndex(reflect.ValueOf(key))
+	if !pgs.IsValid() {
+		return fmt.Errorf("pod group state %s not found in snapshot", key)
+	}
+	allPods := writableField(pgs.Elem(), "allPods").Interface().(map[types.UID]*v1.Pod)
+	unscheduledPods := writableField(pgs.Elem(), "unscheduledPods").Interface().(sets.Set[types.UID])
+	assumedPods := writableField(pgs.Elem(), "assumedPods").Interface().(map[types.UID]*v1.Pod)
+	assignedPods := writableField(pgs.Elem(), "assignedPods").Interface().(sets.Set[types.UID])
+
+	allPods[pod.UID] = pod
+	if pod.Spec.NodeName != "" {
+		assignedPods.Insert(pod.UID)
+		unscheduledPods.Delete(pod.UID)
+		delete(assumedPods, pod.UID)
+	} else {
+		unscheduledPods.Insert(pod.UID)
+	}
+	bumpPodGroupGeneration(pgs)
+	return nil
+}
+
+func (s *ClusterSnapshot) updatePodGroupMember(oldPod, newPod *v1.Pod) error {
+	rv := reflect.ValueOf(s.schedulerSnapshot).Elem()
+	key, err := podGroupKeyOf(rv, newPod)
+	if err != nil {
+		return err
+	}
+	pgs, err := podGroupStateWithMember(rv, key, newPod)
+	if err != nil {
+		return err
+	}
+	allPods := writableField(pgs.Elem(), "allPods").Interface().(map[types.UID]*v1.Pod)
+	unscheduledPods := writableField(pgs.Elem(), "unscheduledPods").Interface().(sets.Set[types.UID])
+	assumedPods := writableField(pgs.Elem(), "assumedPods").Interface().(map[types.UID]*v1.Pod)
+	assignedPods := writableField(pgs.Elem(), "assignedPods").Interface().(sets.Set[types.UID])
+
+	allPods[newPod.UID] = newPod
+	if newPod.Spec.NodeName != "" {
+		assignedPods.Insert(newPod.UID)
+		unscheduledPods.Delete(newPod.UID)
+		delete(assumedPods, newPod.UID)
+	}
+	bumpPodGroupGeneration(pgs)
+	return nil
+}
+
+func (s *ClusterSnapshot) removePodGroupMember(pod *v1.Pod) error {
+	rv := reflect.ValueOf(s.schedulerSnapshot).Elem()
+	key, err := podGroupKeyOf(rv, pod)
+	if err != nil {
+		return err
+	}
+	pgs, err := podGroupStateWithMember(rv, key, pod)
+	if err != nil {
+		return err
+	}
+	allPods := writableField(pgs.Elem(), "allPods").Interface().(map[types.UID]*v1.Pod)
+	unscheduledPods := writableField(pgs.Elem(), "unscheduledPods").Interface().(sets.Set[types.UID])
+	assumedPods := writableField(pgs.Elem(), "assumedPods").Interface().(map[types.UID]*v1.Pod)
+	assignedPods := writableField(pgs.Elem(), "assignedPods").Interface().(sets.Set[types.UID])
+
+	delete(allPods, pod.UID)
+	delete(assumedPods, pod.UID)
+	assignedPods.Delete(pod.UID)
+	unscheduledPods.Delete(pod.UID)
+	bumpPodGroupGeneration(pgs)
+	return nil
 }
 
 func (s *ClusterSnapshot) addPodGroup(pg *schedulingv1beta1.PodGroup) error {

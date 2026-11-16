@@ -33,10 +33,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/klog/v2"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/features"
 	schedulerapi "k8s.io/kubernetes/pkg/scheduler/apis/config"
 	"k8s.io/kubernetes/pkg/scheduler/backend/cache"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 	frameworkruntime "k8s.io/kubernetes/pkg/scheduler/framework/runtime"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 	ft "sigs.k8s.io/scheduler-library/pkg/framework/testing"
@@ -1466,6 +1468,41 @@ func TestScheduleWorkload(t *testing.T) {
 			}
 
 			ft.VerifySnapshot(t, snap, tt.expectSnapshotState)
+
+			if !tt.expectErr {
+				for _, pg := range tt.podGroups {
+					pgState, err := snap.PodGroupStates().Get(pg.Namespace, pg.Name)
+					if err != nil {
+						t.Fatalf("snap.PodGroupStates().Get(%s, %s) failed: %v", pg.Namespace, pg.Name, err)
+					}
+					wantScheduled := sets.New[string]()
+					if result.Status.IsSuccess() && !tt.opts.DryRun {
+						for _, r := range result.PodResults {
+							if r.SelectedNodeName != "" && r.Pod != nil &&
+								r.Pod.Spec.SchedulingGroup != nil && r.Pod.Spec.SchedulingGroup.PodGroupName != nil &&
+								*r.Pod.Spec.SchedulingGroup.PodGroupName == pg.Name {
+								wantScheduled.Insert(r.Pod.Name)
+							}
+						}
+					}
+					if pgState.AllPodsCount() != wantScheduled.Len() {
+						t.Errorf("PodGroup %s AllPodsCount() = %d, want %d", pg.Name, pgState.AllPodsCount(), wantScheduled.Len())
+					}
+					if pgState.ScheduledPodsCount() != wantScheduled.Len() {
+						t.Errorf("PodGroup %s ScheduledPodsCount() = %d, want %d", pg.Name, pgState.ScheduledPodsCount(), wantScheduled.Len())
+					}
+					if unsched := pgState.UnscheduledPods(); len(unsched) != 0 {
+						t.Errorf("PodGroup %s UnscheduledPods() = %v, want empty", pg.Name, unsched)
+					}
+					gotScheduled := sets.New[string]()
+					for _, p := range pgState.ScheduledPods() {
+						gotScheduled.Insert(p.Name)
+					}
+					if !gotScheduled.Equal(wantScheduled) {
+						t.Errorf("PodGroup %s ScheduledPods() = %v, want %v", pg.Name, gotScheduled.UnsortedList(), wantScheduled.UnsortedList())
+					}
+				}
+			}
 		})
 	}
 }
@@ -2977,6 +3014,28 @@ func TestScheduleWorkload_Preemption(t *testing.T) {
 			}
 
 			ft.VerifySnapshot(t, snap, tt.expectSnapshotState)
+
+			pgState, err := snap.PodGroupStates().Get(gangPG.Namespace, gangPG.Name)
+			if err != nil {
+				t.Fatalf("snap.PodGroupStates().Get(%s, %s) failed: %v", gangPG.Namespace, gangPG.Name, err)
+			}
+			wantScheduled := sets.New[string]()
+			if result.Status.IsSuccess() && !opts.DryRun {
+				for _, r := range result.PodResults {
+					if r.SelectedNodeName != "" && r.Pod != nil {
+						wantScheduled.Insert(r.Pod.Name)
+					}
+				}
+			}
+			if pgState.AllPodsCount() != wantScheduled.Len() {
+				t.Errorf("PodGroup %s AllPodsCount() = %d, want %d", gangPG.Name, pgState.AllPodsCount(), wantScheduled.Len())
+			}
+			if pgState.ScheduledPodsCount() != wantScheduled.Len() {
+				t.Errorf("PodGroup %s ScheduledPodsCount() = %d, want %d", gangPG.Name, pgState.ScheduledPodsCount(), wantScheduled.Len())
+			}
+			if unsched := pgState.UnscheduledPods(); len(unsched) != 0 {
+				t.Errorf("PodGroup %s UnscheduledPods() = %v, want empty", gangPG.Name, unsched)
+			}
 		})
 	}
 }
@@ -3199,4 +3258,287 @@ func TestScheduleWorkload_PreservesPassFailureResults(t *testing.T) {
 			ft.VerifySnapshot(t, snap, map[string]sets.Set[string]{"node1": sets.New("v-potential")})
 		})
 	}
+}
+
+// TestSnapshot_PodGroupMembers tests addPodGroupMember, updatePodGroupMember, and removePodGroupMember
+// replicating upstream kubernetes PR #144202 (https://github.com/kubernetes/kubernetes/pull/144202).
+func TestSnapshot_PodGroupMembers(t *testing.T) {
+	featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
+		features.GenericWorkload: true,
+	})
+
+	logger := klog.FromContext(t.Context())
+	node := st.MakeNode().Name("node1").Obj()
+	pg := testutils.MakeBasicPodGroup("pg1", "")
+	pod1 := testutils.MakePod("pod1", "pg1", "1")
+	pod2 := testutils.MakePod("pod2", "pg1", "1")
+	assignedPod := testutils.MakePod("pod3", "pg1", "1")
+	assignedPod.Spec.NodeName = "node1"
+	noPGPod := testutils.MakePod("no-pg", "", "1")
+
+	t.Run("Add, assume, forget, update, and remove pod group members", func(t *testing.T) {
+		snap := cache.NewTestSnapshotWithCompositePodGroups(nil, []*v1.Node{node}, []*schedulingv1beta1.PodGroup{pg}, nil)
+		cs := New(snap, nil)
+
+		if err := cs.addPodGroupMember(pod1.DeepCopy()); err != nil {
+			t.Fatalf("addPodGroupMember(pod1) failed: %v", err)
+		}
+		if err := cs.addPodGroupMember(pod2.DeepCopy()); err != nil {
+			t.Fatalf("addPodGroupMember(pod2) failed: %v", err)
+		}
+		if err := cs.addPodGroupMember(assignedPod.DeepCopy()); err != nil {
+			t.Fatalf("addPodGroupMember(assignedPod) failed: %v", err)
+		}
+
+		pgState, err := snap.PodGroupStates().Get("default", "pg1")
+		if err != nil {
+			t.Fatalf("PodGroupStates().Get failed: %v", err)
+		}
+		if pgState.AllPodsCount() != 3 {
+			t.Errorf("AllPodsCount() = %d, want 3", pgState.AllPodsCount())
+		}
+		if pgState.ScheduledPodsCount() != 1 {
+			t.Errorf("ScheduledPodsCount() = %d, want 1", pgState.ScheduledPodsCount())
+		}
+		if len(pgState.UnscheduledPods()) != 2 {
+			t.Errorf("len(UnscheduledPods()) = %d, want 2", len(pgState.UnscheduledPods()))
+		}
+
+		// AssumePod now updates PodGroupState because pod1 is tracked in allPods/unscheduledPods.
+		assumedPod1 := pod1.DeepCopy()
+		assumedPod1.Spec.NodeName = "node1"
+		assumedPod1Info, err := framework.NewPodInfo(assumedPod1)
+		if err != nil {
+			t.Fatalf("NewPodInfo failed: %v", err)
+		}
+		if err := snap.AssumePod(assumedPod1Info); err != nil {
+			t.Fatalf("AssumePod(pod1) failed: %v", err)
+		}
+		if pgState.ScheduledPodsCount() != 2 {
+			t.Errorf("ScheduledPodsCount() after AssumePod = %d, want 2", pgState.ScheduledPodsCount())
+		}
+		if len(pgState.UnscheduledPods()) != 1 {
+			t.Errorf("len(UnscheduledPods()) after AssumePod = %d, want 1", len(pgState.UnscheduledPods()))
+		}
+
+		// ForgetPod moves pod1 back to unscheduledPods.
+		if err := snap.ForgetPod(logger, assumedPod1); err != nil {
+			t.Fatalf("ForgetPod(pod1) failed: %v", err)
+		}
+		if pgState.ScheduledPodsCount() != 1 {
+			t.Errorf("ScheduledPodsCount() after ForgetPod = %d, want 1", pgState.ScheduledPodsCount())
+		}
+		if len(pgState.UnscheduledPods()) != 2 {
+			t.Errorf("len(UnscheduledPods()) after ForgetPod = %d, want 2", len(pgState.UnscheduledPods()))
+		}
+
+		// UpdatePodGroupMember transitions pod2 to assigned when NodeName is set.
+		updatedPod2 := pod2.DeepCopy()
+		updatedPod2.Spec.NodeName = "node1"
+		if err := cs.updatePodGroupMember(pod2, updatedPod2); err != nil {
+			t.Fatalf("updatePodGroupMember(pod2) failed: %v", err)
+		}
+		if pgState.ScheduledPodsCount() != 2 {
+			t.Errorf("ScheduledPodsCount() after updatePodGroupMember = %d, want 2", pgState.ScheduledPodsCount())
+		}
+		if len(pgState.UnscheduledPods()) != 1 {
+			t.Errorf("len(UnscheduledPods()) after updatePodGroupMember = %d, want 1", len(pgState.UnscheduledPods()))
+		}
+
+		// RemovePodGroupMember removes pods from PodGroupState.
+		for _, p := range []*v1.Pod{pod1, updatedPod2, assignedPod} {
+			if err := cs.removePodGroupMember(p); err != nil {
+				t.Fatalf("removePodGroupMember(%s) failed: %v", p.Name, err)
+			}
+		}
+		if pgState.AllPodsCount() != 0 || pgState.ScheduledPodsCount() != 0 || len(pgState.UnscheduledPods()) != 0 {
+			t.Errorf("expected empty PodGroupState after removing all members, got all=%d scheduled=%d unscheduled=%d",
+				pgState.AllPodsCount(), pgState.ScheduledPodsCount(), len(pgState.UnscheduledPods()))
+		}
+	})
+
+	t.Run("Removing last member when PodGroup object is absent keeps PodGroupState entry", func(t *testing.T) {
+		snap := cache.NewTestSnapshotWithCompositePodGroups([]*v1.Pod{pod1.DeepCopy()}, []*v1.Node{node}, nil, nil)
+		cs := New(snap, nil)
+
+		if err := cs.removePodGroupMember(pod1); err != nil {
+			t.Fatalf("removePodGroupMember(pod1) failed: %v", err)
+		}
+		pgState, err := snap.PodGroupStates().Get("default", "pg1")
+		if err != nil {
+			t.Fatalf("expected PodGroupState to be kept when empty and no PodGroup object exists, got error: %v", err)
+		}
+		if pgState.AllPodsCount() != 0 {
+			t.Errorf("AllPodsCount() = %d, want 0", pgState.AllPodsCount())
+		}
+	})
+
+	t.Run("Error cases", func(t *testing.T) {
+		snap := cache.NewTestSnapshotWithCompositePodGroups(nil, []*v1.Node{node}, []*schedulingv1beta1.PodGroup{pg}, nil)
+		cs := New(snap, nil)
+
+		if err := cs.addPodGroupMember(noPGPod); err == nil {
+			t.Errorf("expected error adding pod without PodGroup")
+		}
+		otherPod := testutils.MakePod("other", "missing-pg", "1")
+		if err := cs.addPodGroupMember(otherPod); err == nil {
+			t.Errorf("expected error adding pod to missing PodGroupState")
+		}
+		if err := cs.updatePodGroupMember(pod1, pod1); err == nil {
+			t.Errorf("expected error updating non-existent pod member")
+		}
+		if err := cs.removePodGroupMember(pod1); err == nil {
+			t.Errorf("expected error removing non-existent pod member")
+		}
+		if err := cs.removePodGroupMember(otherPod); err == nil {
+			t.Errorf("expected error removing pod from missing PodGroup")
+		}
+
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.GenericWorkload, false)
+		snapDisabled := cache.NewTestSnapshotWithCompositePodGroups(nil, []*v1.Node{node}, nil, nil)
+		csDisabled := New(snapDisabled, nil)
+		if err := csDisabled.addPodGroupMember(pod1); err == nil {
+			t.Errorf("expected error when GenericWorkload is disabled")
+		}
+	})
+}
+
+func TestScheduleWorkload_PodGroupState(t *testing.T) {
+	ctx := context.Background()
+	const zoneLabel = "topology.kubernetes.io/zone"
+
+	nodeA := st.MakeNode().Name("node-a").Label(zoneLabel, "zone-a").Capacity(map[v1.ResourceName]string{
+		v1.ResourceCPU:    "4",
+		v1.ResourceMemory: "4Gi",
+		v1.ResourcePods:   "10",
+	}).Obj()
+	nodeB := st.MakeNode().Name("node-b").Label(zoneLabel, "zone-b").Capacity(map[v1.ResourceName]string{
+		v1.ResourceCPU:    "4",
+		v1.ResourceMemory: "4Gi",
+		v1.ResourcePods:   "10",
+	}).Obj()
+
+	t.Run("Incremental ScheduleWorkload calls update PodGroupState for TAS and GangScheduling and revert on DryRun, failure, Transaction Revert, and ResetMutations", func(t *testing.T) {
+		tasGangPG := st.MakePodGroup().Name("tas-gang-pg").Namespace("default").MinCount(2).TopologyKey(zoneLabel).Obj()
+		// Pre-occupy 2 CPU on node-a with an extra pod so Call 1 with a 3-CPU pod must pick node-b (zone-b),
+		// and then free node-a before Call 2 so only PodGroupState.ScheduledPods() constrains Call 2 to zone-b.
+		blockerPod := makeScheduledTestPod("blocker", "node-a", "", "2")
+
+		profileMap, snap, err := ft.SetupSnapshotTestWithPodGroups(
+			ctx,
+			t,
+			[]*v1.Pod{blockerPod},
+			[]*v1.Node{nodeA, nodeB},
+			[]*schedulingv1beta1.PodGroup{tasGangPG},
+			nil,
+		)
+		if err != nil {
+			t.Fatalf("SetupSnapshotTestWithPodGroups failed: %v", err)
+		}
+		cs := New(snap, profileMap)
+
+		// First, schedule a single 3-CPU pod in a basic/minCount-1 group or schedule 2 pods where 1 is scheduled first:
+		// Let's use a TAS basic group for incremental 1-by-1 scheduling and a TAS gang group for multi-group CPG.
+		tasBasicPG := st.MakePodGroup().Name("tas-basic-pg").Namespace("default").BasicPolicy().TopologyKey(zoneLabel).Obj()
+		if err := cs.AddPodGroup(ctx, tasBasicPG); err != nil {
+			t.Fatalf("AddPodGroup failed: %v", err)
+		}
+
+		pod1 := testutils.MakePod("pod1", "tas-basic-pg", "3")
+		pod2 := testutils.MakePod("pod2", "tas-basic-pg", "1")
+		pod3 := testutils.MakePod("pod3", "tas-basic-pg", "4")
+
+		// Call 1: schedule pod1 (3 CPU) and pod3 (4 CPU).
+		// Only node-b has 4 CPU free, so pod1 is scheduled on node-b (zone-b) and pod3 remains unscheduled.
+		res1 := cs.ScheduleWorkload(ctx, []*v1.Pod{pod1, pod3}, NewScheduleWorkloadOptions(false))
+		if !res1.Status.IsSuccess() {
+			t.Fatalf("Call 1 ScheduleWorkload failed: %v", res1.Status)
+		}
+		if len(res1.PodResults) != 1 || res1.PodResults[0].Pod.Name != "pod1" || res1.PodResults[0].SelectedNodeName != "node-b" {
+			t.Fatalf("Call 1 unexpected PodResults: %+v", res1.PodResults)
+		}
+
+		// Verify PodGroupState after Call 1: pod1 is scheduled, and remaining unscheduled pod3 was reverted!
+		pgState, err := snap.PodGroupStates().Get("default", "tas-basic-pg")
+		if err != nil {
+			t.Fatalf("PodGroupStates().Get failed: %v", err)
+		}
+		if pgState.AllPodsCount() != 1 || pgState.ScheduledPodsCount() != 1 || len(pgState.UnscheduledPods()) != 0 {
+			t.Fatalf("after Call 1: AllPodsCount=%d ScheduledPodsCount=%d UnscheduledPods=%d, want 1, 1, 0",
+				pgState.AllPodsCount(), pgState.ScheduledPodsCount(), len(pgState.UnscheduledPods()))
+		}
+		if schedPods := pgState.ScheduledPods(); len(schedPods) != 1 || schedPods[0].Name != "pod1" || schedPods[0].Spec.NodeName != "node-b" {
+			t.Fatalf("after Call 1: ScheduledPods() = %+v, want [pod1 on node-b]", schedPods)
+		}
+
+		// Preempt blockerPod on node-a so node-a now has 4 CPU free while node-b has only 1 CPU free.
+		if _, err := cs.PreemptPods(ctx, []*v1.Pod{blockerPod}); err != nil {
+			t.Fatalf("PreemptPods(blockerPod) failed: %v", err)
+		}
+
+		// Call 2 (DryRun): schedule pod2 (1 CPU). Because pod1 is tracked in PodGroupState.ScheduledPods() on node-b (zone-b),
+		// TopologyPlacementGenerator constrains pod2 to zone-b (node-b).
+		// Because DryRun is true, pod2 is reverted from PodGroupState after Call 2 while pod1 remains.
+		res2Dry := cs.ScheduleWorkload(ctx, []*v1.Pod{pod2.DeepCopy()}, NewScheduleWorkloadOptions(true))
+		if !res2Dry.Status.IsSuccess() {
+			t.Fatalf("Call 2 (DryRun) ScheduleWorkload failed: %v", res2Dry.Status)
+		}
+		if len(res2Dry.PodResults) != 1 || res2Dry.PodResults[0].SelectedNodeName != "node-b" {
+			t.Fatalf("Call 2 (DryRun) SelectedNodeName = %+v, want node-b", res2Dry.PodResults)
+		}
+		if pgState.AllPodsCount() != 1 || pgState.ScheduledPodsCount() != 1 || len(pgState.UnscheduledPods()) != 0 {
+			t.Fatalf("after Call 2 (DryRun): AllPodsCount=%d ScheduledPodsCount=%d UnscheduledPods=%d, want 1, 1, 0",
+				pgState.AllPodsCount(), pgState.ScheduledPodsCount(), len(pgState.UnscheduledPods()))
+		}
+
+		// Call 3 (Failure): schedule pod3 (4 CPU). Even though node-a (zone-a) has 4 CPU free,
+		// TopologyPlacementGenerator restricts placement to zone-b (where pod1 is scheduled), which only has 1 CPU free!
+		// So Call 3 must fail as Unschedulable, and pod3 must be reverted from PodGroupState.
+		res3Fail := cs.ScheduleWorkload(ctx, []*v1.Pod{pod3.DeepCopy()}, NewScheduleWorkloadOptions(false))
+		if res3Fail.Status.Code() != fwk.Unschedulable {
+			t.Fatalf("Call 3 Status = %v, want Unschedulable", res3Fail.Status)
+		}
+		if pgState.AllPodsCount() != 1 || pgState.ScheduledPodsCount() != 1 || len(pgState.UnscheduledPods()) != 0 {
+			t.Fatalf("after Call 3 (Failure): AllPodsCount=%d ScheduledPodsCount=%d UnscheduledPods=%d, want 1, 1, 0",
+				pgState.AllPodsCount(), pgState.ScheduledPodsCount(), len(pgState.UnscheduledPods()))
+		}
+
+		// Call 4 (Transaction Revert): schedule pod2 (1 CPU) non-DryRun inside a reverted transaction.
+		err = cs.Transaction(ctx, func() (TransactionResult, error) {
+			res4 := cs.ScheduleWorkload(ctx, []*v1.Pod{pod2.DeepCopy()}, NewScheduleWorkloadOptions(false))
+			if !res4.Status.IsSuccess() {
+				t.Fatalf("Call 4 inside transaction failed: %v", res4.Status)
+			}
+			if pgState.AllPodsCount() != 2 || pgState.ScheduledPodsCount() != 2 || len(pgState.UnscheduledPods()) != 0 {
+				t.Fatalf("inside transaction: AllPodsCount=%d ScheduledPodsCount=%d UnscheduledPods=%d, want 2, 2, 0",
+					pgState.AllPodsCount(), pgState.ScheduledPodsCount(), len(pgState.UnscheduledPods()))
+			}
+			return Revert, nil
+		})
+		if err != nil {
+			t.Fatalf("Transaction failed: %v", err)
+		}
+		if pgState.AllPodsCount() != 1 || pgState.ScheduledPodsCount() != 1 || len(pgState.UnscheduledPods()) != 0 {
+			t.Fatalf("after Transaction Revert: AllPodsCount=%d ScheduledPodsCount=%d UnscheduledPods=%d, want 1, 1, 0",
+				pgState.AllPodsCount(), pgState.ScheduledPodsCount(), len(pgState.UnscheduledPods()))
+		}
+
+		// Call 5 (Non-DryRun): schedule pod2 (1 CPU) and commit.
+		res5 := cs.ScheduleWorkload(ctx, []*v1.Pod{pod2.DeepCopy()}, NewScheduleWorkloadOptions(false))
+		if !res5.Status.IsSuccess() {
+			t.Fatalf("Call 5 ScheduleWorkload failed: %v", res5.Status)
+		}
+		if pgState.AllPodsCount() != 2 || pgState.ScheduledPodsCount() != 2 || len(pgState.UnscheduledPods()) != 0 {
+			t.Fatalf("after Call 5: AllPodsCount=%d ScheduledPodsCount=%d UnscheduledPods=%d, want 2, 2, 0",
+				pgState.AllPodsCount(), pgState.ScheduledPodsCount(), len(pgState.UnscheduledPods()))
+		}
+
+		// ResetMutations reverts all mutations (Call 5, blockerPod preemption, Call 1, and AddPodGroup).
+		if err := cs.ResetMutations(); err != nil {
+			t.Fatalf("ResetMutations failed: %v", err)
+		}
+		if _, err := snap.PodGroupStates().Get("default", "tas-basic-pg"); err == nil {
+			t.Errorf("expected tas-basic-pg PodGroupState to be removed after ResetMutations")
+		}
+	})
 }

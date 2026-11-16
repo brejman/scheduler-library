@@ -378,6 +378,40 @@ func TestSimulatorIntegration_AddAndRemovePodGroups(t *testing.T) {
 	}
 	assertScheduleWorkloadError(addedPods)
 	assertScheduleWorkloadSuccess(initialPods, false)
+
+	// 8. Verify PodGroupState tracks assumed pods across incremental ScheduleWorkload calls and reverts remaining unscheduled pods.
+	if err := snap.ResetMutations(); err != nil {
+		t.Fatalf("ResetMutations failed: %v", err)
+	}
+	tasBasicPG := makePodGroup(ns, "tas-basic-pg", "", 0, zoneLabel)
+	if err := snap.AddPodGroup(ctx, tasBasicPG); err != nil {
+		t.Fatalf("AddPodGroup(tasBasicPG) failed: %v", err)
+	}
+	tasBasicPod1 := makePod(ns, "tas-basic-pod-1", "tas-basic-pg", "3")
+	tasBasicPodUnsched := makePod(ns, "tas-basic-pod-unsched", "tas-basic-pg", "3")
+	tasBasicPod2 := makePod(ns, "tas-basic-pod-2", "tas-basic-pg", "2")
+	tasBasicPod3 := makePod(ns, "tas-basic-pod-3", "tas-basic-pg", "1")
+
+	// First call schedules tasBasicPod1 (3 CPU) on one zone (leaving 1 CPU free in that zone) and leaves tasBasicPodUnsched unscheduled.
+	res1 := snap.ScheduleWorkload(ctx, []*v1.Pod{tasBasicPod1, tasBasicPodUnsched}, snapshot.NewScheduleWorkloadOptions(false))
+	if !res1.Status.IsSuccess() || len(res1.PodResults) != 1 {
+		t.Fatalf("Expected 1 scheduled pod in first incremental call, got status=%v results=%v", res1.Status, res1.PodResults)
+	}
+	selectedNode := res1.PodResults[0].SelectedNodeName
+
+	// Second call with a 2-CPU pod must fail as Unschedulable because TopologyPlacementGenerator sees tasBasicPod1
+	// in PodGroupState.ScheduledPods() and restricts placement to selectedNode's zone (which only has 1 CPU left),
+	// even though the other zone has 4 CPU free.
+	res2 := snap.ScheduleWorkload(ctx, []*v1.Pod{tasBasicPod2}, snapshot.NewScheduleWorkloadOptions(false))
+	if res2.Status.Code() != fwk.Unschedulable {
+		t.Fatalf("Expected second incremental call with 2-CPU pod to be Unschedulable due to TAS domain lock, got %v", res2.Status)
+	}
+
+	// Third call with a 1-CPU pod succeeds on the same node in the locked zone.
+	res3 := snap.ScheduleWorkload(ctx, []*v1.Pod{tasBasicPod3}, snapshot.NewScheduleWorkloadOptions(false))
+	if !res3.Status.IsSuccess() || len(res3.PodResults) != 1 || res3.PodResults[0].SelectedNodeName != selectedNode {
+		t.Fatalf("Expected third incremental call with 1-CPU pod to succeed on %s, got status=%v results=%v", selectedNode, res3.Status, res3.PodResults)
+	}
 }
 
 func makePod(ns, name, podGroupName, cpu string) *v1.Pod {
